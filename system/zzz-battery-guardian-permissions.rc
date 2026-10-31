@@ -1,0 +1,4 @@
+# Battery Guardian allows ordinary apps to write this single charging switch.
+# Any app on the device can enable or disable charging while this rule is active.
+on post-fs-data
+    chmod 0666 /sys/class/power_supply/battery/batt_slate_mode
