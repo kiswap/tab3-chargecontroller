@@ -393,6 +393,16 @@ adb root
 adb shell 'echo 0 > /sys/class/power_supply/battery/batt_slate_mode'
 ```
 
+## 14. Notification alternation fix (2026-10-31)
+
+After installation, the foreground notification alternated about every 30 seconds between `Discharging` and `Control unavailable` while the battery percentage remained at 42% and slate mode remained `1`.
+
+Root cause: every `ACTION_BATTERY_CHANGED` broadcast called `updateUnavailableNotice()`, overwriting the valid controller status. The controller itself polls every 60 seconds, so the next poll replaced the false unavailable message with `Discharging` again. The broadcasts are more frequent than the poll interval on this tablet.
+
+The receiver now only updates the latest broadcast percentage; it no longer changes the controller status. The normal controller poll remains responsible for status notifications. SELinux audit lines seen during diagnosis had `permissive=1`, so SELinux was logging those accesses but not enforcing the reported denials.
+
+The corrected APK was built, installed on the connected GT-P5200, and the foreground service relaunched. Immediately afterward, the notification showed `Discharging · 42% (resumes at 30%)` and `batt_slate_mode` remained `1`. Long-duration confirmation that the alternating notification has stopped is still pending from the user.
+
 If `adb root` hangs during adbd restart, wait for USB reconnect or unplug/replug, then run `adb shell` again. This was observed on the tablet.
 - Consider a watchdog/recovery mechanism if the app is killed while slate mode is enabled. Avoid creating an aggressive wake lock or excessive polling.
 - The controller should be idempotent: writing the same mode should not create harmful repeated transitions.

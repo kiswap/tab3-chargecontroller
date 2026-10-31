@@ -35,3 +35,7 @@ The rule is installed at `/system/etc/init/zzz-battery-guardian-permissions.rc`.
 ## Source lead
 
 The cited `santos10-dev/android_kernel_samsung_santos10` `cm-14.1` source page could not be fetched in this session. A related LineageOS `cm-14.1` driver shows `batt_slate_mode` in the Samsung battery attributes and slate mode assigning battery status to discharging, but the exact handler still needs verification against the installed build.
+
+## Follow-up: notification status fix (2026-10-31)
+
+The notification had alternated every ~30 seconds between `Discharging` and `Control unavailable`. The battery broadcast receiver was incorrectly reporting control unavailable on every `ACTION_BATTERY_CHANGED` event; a 60-second controller poll then restored the correct status. The receiver now updates only the cached percentage, leaving controller status updates to the poll. The corrected APK was built and installed, and the foreground notification initially showed `Discharging · 42% (resumes at 30%)` with `batt_slate_mode=1`. Observe the tablet to confirm the alternation has stopped.

@@ -47,7 +47,6 @@ public final class BatteryService extends Service {
             int scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
             if (level >= 0 && scale > 0) {
                 broadcastPercent = Math.max(0, Math.min(100, (level * 100) / scale));
-                if (worker != null) worker.post(() -> updateUnavailableNotice());
             }
         }
     };
