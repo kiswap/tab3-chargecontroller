@@ -393,6 +393,74 @@ adb root
 adb shell 'echo 0 > /sys/class/power_supply/battery/batt_slate_mode'
 ```
 
+## 15. Charging diagnostics (2026-11-02)
+
+The service emits a rolling diagnostic file at `/sdcard/Android/data/org.chargeguardian/files/diagnostics/battery-guardian.log` and `.log.1`, and mirrors records to logcat as `BatteryGuardian` / `DIAG`. Every poll records capacity, slate mode, charger-online value, AC/USB online flags, kernel battery status, current readings, controller action, and mode readback. The current file rotates at 512 KiB; one previous file is retained. Diagnostics must not interrupt control if storage is unavailable.
+
+The diagnostic log established a real control failure on the normal charger: from 10:34 to 11:00, capacity rose from 85% to 90%, `batt_slate_mode` remained `1`, and `current_avg` stayed positive (about 339 to 770); every poll reported action `hold`. The app only wrote mode `1` at the threshold and did not reapply it when the charger resumed current. The tablet's `cm-14.1` kernel source shows each write of `1` sets slate mode, sets battery online to battery, and sends `POWER_NOW=0` to `sec-charger`; the source does not show slate mode being re-applied by this app when positive current resumes. The exact binary kernel match to the installed ROM is still unverified.
+
+The controller now treats two consecutive positive `current_avg` samples while mode `1` and a charger is online as resumed charging. It reapplies mode `1`, verifies the readback, and retries at most once per five minutes while positive current continues. The notification reports `Charging despite pause` during that condition. The updated APK was built and installed at 11:04 on 2026-11-02. Its initial computer-USB sample was capacity 90%, mode 1, AC online 0, USB online 1, and current_avg -179. Wall-charger verification remains pending.
+
+### Charging threshold update (2026-11-03)
+
+The production resume threshold is now 50% and the stop threshold remains 70%. The user selected this tighter range for the wall-mounted tablet. Earlier 30% references below describe the prior configuration and diagnostic events.
+
+### USB disconnect report clears the pause (2026-11-04)
+
+The diagnostic log from the laptop USB session repeatedly showed the same sequence: mode 0 at 69%, `stop_threshold_write_ok` at 70%, then on the next poll `ac_online=0 usb_online=0 android_plugged=false` and `clear_on_unplug_write_ok`. This reset mode to 0 and charging resumed. The sequence repeated at 09:45, 10:36, 15:52, 17:21, and 17:48. This indicates the controller's disconnect handling was undoing its own pause; the sysfs and Android plug states cannot distinguish that from a real unplug in this case.
+
+The controller now preserves mode 1 across offline reports and only clears the pause at 50%, including while offline. This can leave the tablet in pause mode after a real unplug until it reaches 50%; a later charger connection will remain paused until the configured resume point. The laptop USB session also showed the battery at 69% with negative `current_avg` (about -165 at the last sample), so it was not supplying net charge at that time. Wall-charger behavior should be monitored separately.
+
+On 2026-11-03 the saved log showed a powerbank/source dropout: AC was online and average current positive at 10:18–10:19 while mode 1 was set; after the app reasserted mode 1, AC and USB both read 0 and the tablet began discharging. At 30%, the app wrote mode 0, but AC/USB remained 0 and the tablet continued down to 6%, then the service stopped with power loss. The service restarted at 12% after power returned. This fits a powerbank auto-shutdown when charging is paused or a physical disconnect; the log cannot distinguish the two.
+
+Root cause in app logic: it treated nonzero `sec-charger/online` as connected power, even while `ac/online=0` and `usb/online=0`. The controller now uses the AC/USB online nodes, with the Android plug broadcast as fallback only when those nodes are unavailable. Follow-up logs on 2026-11-04 showed slate mode itself caused AC/USB and Android plug state to report offline, so clearing mode on every apparent disconnect made the controller resume charging right after the 70% pause. The controller now keeps slate mode latched across disconnect reports and releases it at the 50% resume threshold. This may leave the tablet paused after a genuine unplug until it reaches 50%; this is consistent with maintaining the selected hysteresis state. A bank requiring a button press/reconnect cannot be restarted by this APK.
+
+The source-detection correction was built and installed at 15:27 on 2026-11-03. Immediately after install the device was at 12%, mode 0, AC offline, USB online, with negative `current_avg`; it was attached to the computer, whose USB output may be insufficient to charge while the tablet is on. Reconnect a reliable wall charger before leaving the tablet unattended.
+
+## 16. USB meter measurement (2026-11-04)
+
+The app's own readings come from the tablet's kernel, so they cannot show on their own whether the charger still delivers power while slate mode is on. To check this from outside, a RuiDeng UM34C USB meter sits between the wall charger and the tablet. The meter measures the voltage and current that the tablet actually draws from the charger.
+
+### Meter facts (verified on 2026-11-04)
+
+- The meter's Bluetooth address is `00:15:A3:00:36:83`, and the pairing PIN is 1234. It is paired and trusted on the user's Linux laptop.
+- The meter has a physical Bluetooth switch. While the switch is off, the meter does not appear in any scan.
+- The meter's USB ports carry only power. A laptop cannot read the meter over USB, so the only data link is Classic Bluetooth with the Serial Port Profile on RFCOMM channel 1.
+- The meter accepts only one Bluetooth connection at a time. While the logger runs, a phone app or a second logger cannot connect.
+- The laptop asks for a reading by sending the single byte `0xF0`. The meter answers with a 130-byte frame. All values in the frame are big-endian.
+
+| Offset | Size | Value |
+| --- | --- | --- |
+| 0 | 2 | Header, always `0x0D4C` for the UM34C |
+| 2 | 2 | Voltage in units of 0.01 V |
+| 4 | 2 | Current in units of 0.001 A |
+| 6 | 4 | Power in units of 0.001 W |
+| 10 | 2 | Meter temperature in °C |
+| 14 | 2 | Selected data group |
+| 16 + 8 × group | 4 + 4 | mAh and mWh of the selected group |
+| 96, 98 | 2 each | D+ and D− data-line voltages in units of 0.01 V |
+| 100 | 2 | Detected charging protocol |
+| 102, 106 | 4 each | mAh and mWh of the meter's own recording |
+| 112 | 4 | Seconds of the meter's own recording |
+
+The first reading was taken on 2026-11-04 at 16:52 while the tablet was charging in mode 0. It showed 5.09 V, 0.644 A and 3.28 W.
+
+### Logging and comparison tools
+
+`tools/um34c_logger.py` reads the meter once per second and appends each reading to a CSV file with a local timestamp. It needs only the Python standard library. After a Bluetooth dropout it reconnects by itself, and the outage shows up as a gap in the timestamps.
+
+`tools/compare_charging.py` merges the meter CSV with `battery-guardian.log`. It gives each meter reading the app state from the most recent poll or mode write. Mode 1 counts as paused even when the AC and USB nodes report offline, because slate mode itself makes them report offline (see the 2026-11-04 entry above). The report lists the meter current for each app state, the paused periods in which the meter saw more than 0.05 A for at least 30 seconds, each cycle with its start and end capacity and the energy delivered, and the meter current before and after each mode write. The README has the commands.
+
+One limit applies to the app's own check. The app counts positive battery current only while it sees a charger online. In slate mode the charger usually reads offline, so the app's `Charging despite pause` warning may never fire. During a pause, the meter is therefore the only reliable sign that the charger still delivers power.
+
+The first long logging run started on 2026-11-04. Its results are still pending.
+
+## Follow-up: resume recovery attempt (2026-11-05)
+
+After the 2026-11-04 meter comparison showed that clearing slate mode did not reliably restart battery charging until the cable was replugged, the controller gained a one-time resume pulse. After mode 1 is cleared at or below 50%, it waits for two consecutive negative `current_avg` samples while a source is reported present, writes mode 1, waits 1.5 seconds, then writes mode 0 and verifies both writes. It checks subsequent polls for positive average current; if current remains negative after the attempt, it reports that charging was not detected and asks for a charger replug. Positive average current on two polls marks charging confirmed. The notification distinguishes “charge allowed” from confirmed charging.
+
+The updated APK was built and installed on 2026-11-05. At installation the tablet was at 57%, mode 0, attached to laptop USB. The foreground service started successfully. Its laptop-USB readings were negative and noisy; no recovery pulse was expected or attempted because the tablet was above 50%. The new behavior has not yet been validated with the wall charger or at a resume event. Do not count laptop USB readings as wall-charger validation. Next validation: keep the tablet on the wall charger through a resume at 50%, then check the notification and diagnostic log for `resume_recovery_pulse` followed by `resume_charge_confirmed`; if it reports `resume_recovery_failed`, replug the wall-charger cable and see whether positive current is then confirmed.
+
 ## 14. Notification alternation fix (2026-10-31)
 
 After installation, the foreground notification alternated about every 30 seconds between `Discharging` and `Control unavailable` while the battery percentage remained at 42% and slate mode remained `1`.
@@ -522,6 +590,7 @@ adb logcat
 6. What should happen when the charger is unplugged while slate mode is enabled?
 7. What service-start and reboot behaviour is reliable on Android 7.1.2?
 8. Is an init-integrated root helper required, and if so, what is the least invasive maintainable way to provide it?
+9. While slate mode is on and the wall charger is connected, does the tablet still draw current from the charger? If it does, the charger may be powering the system while the battery is not charged, or the charge may have resumed. The UM34C meter log from section 16 should answer this. Compare the meter current with the app's `battery_status` and `current_avg` for the same periods.
 
 ---
 
